@@ -1,0 +1,19 @@
+{
+  "name": "pool-ws",
+  "version": "1.0.0",
+  "description": "Pool App websocket service",
+  "main": "server.js",
+  "scripts": {
+    "start": "pm2-runtime start server.js",
+    "dev": "pm2-dev start server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@google-cloud/pubsub": "1.1.5",
+    "pm2": "4.1.2",
+    "winston": "3.2.1",
+    "ws": "7.2.0"
+  },
+  "author": "",
+  "license": "ISC"
+}

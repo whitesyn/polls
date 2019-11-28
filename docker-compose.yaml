@@ -1,0 +1,140 @@
+version: '3.7'
+
+services:
+  # Gateway service
+  traefik:
+    image: 'traefik:v2.0'
+    container_name: 'poll-traefik'
+    command:
+      - '--log.level=DEBUG'
+      # Traefik will listen on port 8080 by default for API request.
+      - '--api.insecure=true'
+      # Enabling docker provider
+      - '--providers.docker=true'
+      # Do not expose containers unless explicitly told so
+      - '--providers.docker.exposedbydefault=false'
+      # Traefik will listen to incoming request on the port 80 (HTTP)
+      - '--entrypoints.web.address=:80'
+    ports:
+      - '80:80'
+      # The Web UI (enabled by --api.insecure=true)
+      - '8080:8080'
+    volumes:
+      - '/var/run/docker.sock:/var/run/docker.sock:ro'
+      - './users.txt:/users.txt:ro'
+
+  # Google PubSub emulator
+  pubsub:
+    image: messagebird/gcloud-pubsub-emulator:latest
+    container_name: 'poll-pubsub'
+    restart: on-failure
+    environment:
+      # Create project, topic, subscription on startup
+      - PUBSUB_PROJECT1=poll-dev,events:poll-events
+    ports:
+      - '8681:8681'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8681"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # API service
+  poll-api:
+    build:
+      context: ./poll-api
+    container_name: 'poll-api'
+    restart: on-failure
+    environment:
+      - PORT=9000
+      - DB_HOST=datastore:27017
+      - PUBSUB_EMULATOR_HOST=pubsub:8681
+      - PUBSUB_PROJECT_ID=poll-dev
+      - PUBSUB_TOPIC=events
+    ports:
+      - 9000:9000
+    labels:
+      # Explicitly tell Traefik to expose this container
+      - 'traefik.enable=true'
+      # Setup BasicAuth middleware
+      - 'traefik.http.middlewares.auth.basicauth.usersfile=/users.txt'
+      - 'traefik.http.middlewares.auth.basicauth.headerField=X-WebAuth-User'
+      # The domain the service will respond to
+      - 'traefik.http.routers.pollapi.rule=Host(`poll.docker.localhost`) && PathPrefix(`/api`)'
+      # Allow request only from the predefined entry point named "web"
+      - 'traefik.http.routers.pollapi.entrypoints=web'
+      # Apply BasicAuth middleware
+      - 'traefik.http.routers.pollapi.middlewares=auth@docker'
+    depends_on:
+      - datastore
+      - pubsub
+
+  # WebSockets service
+  poll-ws:
+    build:
+      context: ./poll-ws
+    container_name: 'poll-ws'
+    restart: on-failure
+    environment:
+      - PORT=8123
+      - PUBSUB_EMULATOR_HOST=pubsub:8681
+      - PUBSUB_PROJECT_ID=poll-dev
+      - PUBSUB_SUBSCRIPTION_NAME=poll-events
+      - PUBSUB_TOPIC=events
+    init: true
+    ports:
+      - 8123:8123
+    volumes:
+      - ./poll-ws/:/usr/src/app:rw,cached
+      # Do not override `node_modules` in container
+      - /usr/src/app/node_modules
+    command: 'npm run dev'
+    labels:
+      # Explicitly tell Traefik to expose this container
+      - 'traefik.enable=true'
+      # The domain the service will respond to
+      - 'traefik.http.routers.pollws.rule=Host(`pollws.docker.localhost`)'
+      # Allow request only from the predefined entry point named "web"
+      - 'traefik.http.routers.pollws.entrypoints=web'
+    depends_on:
+      - pubsub
+
+  # Frontend App
+  poll-ui:
+    build:
+      context: ./poll-ui
+    container_name: 'poll-ui'
+    restart: on-failure
+    environment:
+      - REACT_APP_WS_HOST=ws://pollws.docker.localhost/
+      - REACT_APP_API_HOST=http://poll.docker.localhost/api
+    init: true
+    ports:
+      - 3000:3000
+    volumes:
+      - ./poll-ui/:/usr/src/app:rw,cached
+      # Do not override `node_modules` in container
+      - /usr/src/app/node_modules
+    command: 'yarn start'
+    labels:
+      # Explicitly tell Traefik to expose this container
+      - 'traefik.enable=true'
+      # Setup BasicAuth middleware
+      - 'traefik.http.middlewares.auth.basicauth.usersfile=/users.txt'
+      - 'traefik.http.middlewares.auth.basicauth.headerField=X-WebAuth-User'
+      # The domain the service will respond to
+      - 'traefik.http.routers.pollui.rule=Host(`poll.docker.localhost`)'
+      # Allow request only from the predefined entry point named "web"
+      - 'traefik.http.routers.pollui.entrypoints=web'
+      # Apply BasicAuth middleware
+      - 'traefik.http.routers.pollui.middlewares=auth@docker'
+    depends_on:
+      - poll-ws
+      - poll-api
+
+  # Datastore to store polls data
+  datastore:
+    image: mongo
+    container_name: 'poll-datastore'
+    ports:
+      - 27017:27017
